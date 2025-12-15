@@ -5,8 +5,9 @@ import torch
 from torch import nn, Tensor
 from torch.nn import functional as F
 from semseg.models.layers import DropPath
+from einops import rearrange # 必须使用 einops
 
-# ================= 路径修补 =================  ==
+# ================= 路径修补 =================
 current_file_path = Path(__file__).resolve()
 project_root = current_file_path.parents[4]
 if str(project_root) not in sys.path:
@@ -20,7 +21,6 @@ except ImportError as e:
     raise e
 # ===========================================
 
-
 class Attention(nn.Module):
     def __init__(self, dim, head, sr_ratio, quantize=False): 
         super().__init__()
@@ -28,9 +28,10 @@ class Attention(nn.Module):
         self.sr_ratio = sr_ratio 
         self.scale = (dim // head) ** -0.5
         
-        # Q.Linear 本质是 Conv2d 1x1，需要 [B, C, H, W] 输入
+        # Linear 底层是 Conv2d，输入必须是 [B, C, H, W]
         self.q = Q.Linear(dim, dim, quantize=quantize)
-        self.kv = Q.Linear(dim, dim*2, quantize=quantize)
+        self.k = Q.Linear(dim, dim, quantize=quantize)
+        self.v = Q.Linear(dim, dim, quantize=quantize)
         self.proj = Q.Linear(dim, dim, quantize=quantize)
 
         self.matmul_qk = QuanMMHead(quan_input_a=quantize, quan_input_b=quantize)
@@ -38,80 +39,94 @@ class Attention(nn.Module):
         self.softmax = Q.QuanSoftmax(dim=-1, quantize=quantize)
 
         if sr_ratio > 1:
-            # 这里的 stride 必须显式指定
             self.sr = Q.Conv2d(dim, dim, kernel_size=sr_ratio, stride=sr_ratio, quantize=quantize)
             self.norm = Q.LayerNorm(dim, quantize=quantize)
 
     def forward(self, x: Tensor, H, W, metric: Tensor=None) -> Tensor:
-        B, N, C = x.shape
+        # Block 输入 x: [B, 1, N, C]
         
-        # 【维度修正 1】将 [B, N, C] 转为 [B, C, H, W] 以适应 Q.Linear (Conv2d)
-        x_4d = x.permute(0, 2, 1).reshape(B, C, H, W)
+        # 1. 恢复成图像 [B, C, H, W] 准备计算 Q
+        x_img = rearrange(x, 'b 1 (h w) c -> b c h w', h=H, w=W)
         
-        # 计算 Q
         if metric is None:
-            # 输入 4D -> Q.Linear -> 输出 4D -> 展平回 [B, N, C] 以继续后面的 reshape
-            q = self.q(x_4d).flatten(2).transpose(1, 2)
+            # Q Linear 输入: [B, C, H, W] -> 输出: [B, C, H, W]
+            q = self.q(x_img)
         else:
-            # metric 也需要转 4D
-            metric_4d = metric.permute(0, 2, 1).reshape(B, C, H, W)
-            q = self.q(metric_4d).flatten(2).transpose(1, 2)
-        
-        # 此时 q 又是 [B, N, C]，按照原逻辑处理 heads
-        q = q.reshape(B, N, self.head, C // self.head).permute(0, 2, 1, 3)
+            # Metric 也要转成 [B, C, H, W]
+            metric_img = rearrange(metric, 'b 1 (h w) c -> b c h w', h=H, w=W)
+            q = self.q(metric_img)
 
-        # 处理 SR (Spatial Reduction)
+        # 准备 Attention Q: [B, C, H, W] -> [B, Heads, N, Dim]
+        q = rearrange(q, 'b (head dim) h w -> b head (h w) dim', head=self.head)
+
+        # 2. SR 路径 (计算 K, V 输入)
         if self.sr_ratio > 1:
-            # x_4d 已经是 [B, C, H, W]，直接喂给 self.sr (Conv2d)
-            x_sr = self.sr(x_4d) 
-            # 变回 [B, N_sr, C] 给 LayerNorm 和 KV 计算
-            x_sr = x_sr.flatten(2).transpose(1, 2)
-            x_sr = self.norm(x_sr)
+            # SR Conv: [B, C, H, W] -> [B, C, H', W']
+            x_sr = self.sr(x_img)
             
-            # 为了进 self.kv (Q.Linear)，还需要变回 4D
-            # 注意：sr 之后的 H, W 变小了，不能用原来的 H, W
-            # 简单的做法是利用 x_sr 的 shape 自动推导，或者再次 reshape
-            B, N_sr, C = x_sr.shape
-            # H_sr = H // self.sr_ratio (大致如此，但用 view 还原更安全)
-            # 这里为了简单，我们重新 view 成 (B, C, N_sr, 1) 或者 (B, C, H_sr, W_sr)
-            # 因为 Q.Linear 是 1x1 卷积，空间维度由 H*W 还是 N*1 其实不影响计算结果
-            x_sr_4d = x_sr.permute(0, 2, 1).unsqueeze(-1) # [B, C, N_sr, 1]
+            # LayerNorm 需要 Token: [B, 1, N', C]
+            x_sr_norm = rearrange(x_sr, 'b c h w -> b 1 (h w) c')
+            x_sr_norm = self.norm(x_sr_norm)
+            
+            # 【重点】计算完 Norm 后，必须恢复成 SR 后的图像尺寸 [B, C, H', W']
+            # H' = H / sr, W' = W / sr
+            # 只有这样，喂给 K/V Linear 的才是真正的 4D 图像
+            x_for_kv = rearrange(x_sr_norm, 'b 1 (h w) c -> b c h w', h=H//self.sr_ratio, w=W//self.sr_ratio)
         else:
-            x_sr_4d = x_4d # [B, C, H, W]
+            # 【重点】无 SR，直接使用原图 x_img [B, C, H, W]
+            # 绝对不进行任何 reshape 到 1 N 的操作
+            x_for_kv = x_img
 
-        # 计算 K, V
-        # 输入 [B, C, H, W] 或 [B, C, N, 1] -> 输出对应的 4D -> 展平
-        kv = self.kv(x_sr_4d).flatten(2).transpose(1, 2)
-        k, v = kv.reshape(B, -1, 2, self.head, C // self.head).permute(2, 0, 3, 1, 4)
+        # 3. 计算 K, V (输入输出全是 B C H W)
+        k = self.k(x_for_kv) # Output: [B, C, H', W']
+        v = self.v(x_for_kv) # Output: [B, C, H', W']
 
-        # Attention 计算 (输入已经是量化友好的 4D 形式: B, Heads, N, Dim)
-        attn = (self.matmul_qk(q, k.transpose(-2, -1)) * self.scale)
+        # 4. 准备 MatMul
+        # K -> [B, Heads, Dim, N']
+        k = rearrange(k, 'b (head dim) h w -> b head dim (h w)', head=self.head)
+        
+        # V -> [B, Heads, N', Dim]
+        v = rearrange(v, 'b (head dim) h w -> b head (h w) dim', head=self.head)
+        
+        # 5. Attention 计算
+        # q: [B, H, N, D], k: [B, H, D, N']
+        attn = (self.matmul_qk(q, k) * self.scale) 
         attn = self.softmax(attn)
-        x = self.matmul_av(attn, v).transpose(1, 2).reshape(B, N, C)
         
-        # 【维度修正 2】最后的投影 Output Projection
-        # 再次转 4D 给 self.proj
-        x_4d_out = x.permute(0, 2, 1).reshape(B, C, H, W)
-        x = self.proj(x_4d_out).flatten(2).transpose(1, 2)
+        # x: [B, H, N, D]
+        x = self.matmul_av(attn, v)
         
+        # 6. Output Projection
+        # [B, H, N, D] -> [B, C, H, W] (恢复图像格式给 Proj Linear)
+        x = rearrange(x, 'b head (h w) dim -> b (head dim) h w', h=H, w=W)
+        
+        # Proj Linear: [B, C, H, W] -> [B, C, H, W]
+        x = self.proj(x)
+        
+        # 恢复 Token 模式 [B, 1, N, C] 给 Block 输出
+        x = rearrange(x, 'b c h w -> b 1 (h w) c')
         return x
 
 
 class DWConv(nn.Module):
     def __init__(self, dim, quantize=False):
         super().__init__()
-        # Conv2d 参数全用关键字指定
         self.dwconv = Q.Conv2d(
             dim, dim, kernel_size=3, stride=1, padding=1, groups=dim, quantize=quantize
         )
 
     def forward(self, x: Tensor, H, W) -> Tensor:
-        # DWConv 原代码本来就处理了 4D 转换，所以这里不需要大改，保留原逻辑即可
-        # x: [B, N, C]
-        B, _, C = x.shape
-        x = x.transpose(1, 2).view(B, C, H, W) # 变为 [B, C, H, W]
+        # 输入 x: [B, 1, N, C]
+        
+        # 恢复图像 [B, C, H, W]
+        x = rearrange(x, 'b 1 (h w) c -> b c h w', h=H, w=W)
         x = self.dwconv(x)
-        return x.flatten(2).transpose(1, 2)    # 变回 [B, N, C]
+        
+        # 变回 Token [B, 1, N, C] (因为 DWConv 在 MLP 中间，后面接 Act 还是 4D 无所谓，但为了统一接口返回 Token)
+        # 或者为了配合 MLP 的后续 FC2，这里返回图像格式最省事，看 MLP 怎么写
+        # 这里我们按标准返回 Token
+        x = rearrange(x, 'b c h w -> b 1 (h w) c')
+        return x
 
 
 class MLP(nn.Module):
@@ -123,30 +138,66 @@ class MLP(nn.Module):
         self.act = Q.nn_GELU(quantize=quantize)
         
     def forward(self, x: Tensor, H, W) -> Tensor:
-        # 【维度修正 3】MLP 全程使用 4D 计算会更高效，避免反复 transpose
-        B, N, C = x.shape
-        x_4d = x.permute(0, 2, 1).reshape(B, C, H, W)
+        # 输入 x: [B, 1, N, C]
         
-        # fc1: [B, C, H, W] -> [B, C2, H, W]
-        x_4d = self.fc1(x_4d) 
+        # 1. 变为 Image [B, C, H, W] 给 fc1
+        x = rearrange(x, 'b 1 (h w) c -> b c h w', h=H, w=W)
         
-        # dwconv: 它内部有 transpose，我们得改一下调用方式或者让它接受 4D
-        # 既然 DWConv 类已经写死了接收 [B, N, C]，我们就先把 4D 转回去喂给它，
-        # 或者为了性能，把 DWConv 里的 reshape 拆出来。
-        # 为了代码改动最小化，我们这里还是切回 [B, N, C] 喂给 dwconv
+        # 2. FC1: [B, C1, H, W] -> [B, C2, H, W]
+        x = self.fc1(x) 
         
-        x_temp = x_4d.flatten(2).transpose(1, 2) # [B, N, C2]
-        x_temp = self.dwconv(x_temp, H, W)       # [B, N, C2]
-        x_4d = x_temp.permute(0, 2, 1).reshape(B, -1, H, W) # [B, C2, H, W]
+        # 3. DWConv (DWConv 内部我修改为接收 Image 格式会更高效，但为了兼容上面写的接口，这里先转 token 再转回来)
+        # 为了效率，建议修改 DWConv 接收 Image。
+        # 这里假设 DWConv 接收 Token 并返回 Token (如上面定义)
+        # 所以我们需要先转 Token
+        x = rearrange(x, 'b c h w -> b 1 (h w) c')
+        x = self.dwconv(x, H, W) # Output: [B, 1, N, C2]
         
-        # act: 4D 没问题
-        x_4d = self.act(x_4d)
+        # 转回 Image 给 Act 和 FC2
+        x = rearrange(x, 'b 1 (h w) c -> b c h w', h=H, w=W)
         
-        # fc2: [B, C2, H, W] -> [B, C1, H, W]
-        x_4d = self.fc2(x_4d)
+        # 4. Act
+        x = self.act(x)
         
-        return x_4d.flatten(2).transpose(1, 2)
+        # 5. FC2: [B, C2, H, W] -> [B, C1, H, W]
+        x = self.fc2(x)
+        
+        # 6. 恢复 [B, 1, N, C]
+        x = rearrange(x, 'b c h w -> b 1 (h w) c')
+        
+        return x
 
+# 优化版 DWConv (配合 MLP 优化)
+class DWConvOptimized(nn.Module):
+    def __init__(self, dim, quantize=False):
+        super().__init__()
+        self.dwconv = Q.Conv2d(
+            dim, dim, kernel_size=3, stride=1, padding=1, groups=dim, quantize=quantize
+        )
+    def forward(self, x: Tensor) -> Tensor:
+        # 直接接收 [B, C, H, W]
+        return self.dwconv(x)
+
+# 优化版 MLP (全程 B C H W)
+class MLPOptimized(nn.Module):
+    def __init__(self, c1, c2, quantize=False): 
+        super().__init__()
+        self.fc1 = Q.Linear(c1, c2, quantize=quantize)
+        self.dwconv = DWConvOptimized(c2, quantize=quantize)
+        self.fc2 = Q.Linear(c2, c1, quantize=quantize)
+        self.act = Q.nn_GELU(quantize=quantize)
+        
+    def forward(self, x: Tensor, H, W) -> Tensor:
+        # 输入 x: [B, 1, N, C]
+        
+        # 全程 Image 格式处理
+        x = rearrange(x, 'b 1 (h w) c -> b c h w', h=H, w=W)
+        x = self.fc1(x) 
+        x = self.dwconv(x)
+        x = self.act(x)
+        x = self.fc2(x)
+        x = rearrange(x, 'b c h w -> b 1 (h w) c')
+        return x
 
 class PatchEmbed(nn.Module):
     def __init__(self, c1=3, c2=32, patch_size=7, stride=4, padding=0, quantize=False):
@@ -157,9 +208,13 @@ class PatchEmbed(nn.Module):
         self.norm = Q.LayerNorm(c2, quantize=quantize)
 
     def forward(self, x: Tensor) -> Tensor:
-        x = self.proj(x)
+        # x: [B, 3, H_in, W_in]
+        x = self.proj(x) # -> [B, C, H, W]
         _, _, H, W = x.shape
-        x = x.flatten(2).transpose(1, 2)
+        
+        # [B, C, H, W] -> [B, 1, N, C]
+        x = rearrange(x, 'b c h w -> b 1 (h w) c')
+        
         x = self.norm(x)
         return x, H, W
 
@@ -170,9 +225,11 @@ class Block(nn.Module):
         self.attn = Attention(dim, head, sr_ratio, quantize=quantize)
         self.drop_path = DropPath(dpr) if dpr > 0. else nn.Identity()
         self.norm2 = Q.LayerNorm(dim, quantize=quantize)
-        self.mlp = MLP(dim, int(dim*4), quantize=quantize)
+        # 使用优化版 MLP，减少 reshape 次数
+        self.mlp = MLPOptimized(dim, int(dim*4), quantize=quantize)
 
     def forward(self, x: Tensor, H, W, metric: Tensor=None) -> Tensor:
+        # x 始终保持 [B, 1, N, C]
         x = x + self.drop_path(self.attn(self.norm1(x), H, W, metric))
         x = x + self.drop_path(self.mlp(self.norm2(x), H, W))
         return x
@@ -227,43 +284,50 @@ class CMNeXt(nn.Module):
         outs = []
 
         # stage 1
-        x_cam, H, W = self.patch_embed1(x_cam)
+        x_cam, H, W = self.patch_embed1(x_cam) # -> [B, 1, N, C]
         if metric is not None:
-            metric = torch.nn.functional.interpolate(input=metric, size=(H, W), mode='bilinear', align_corners=False)
-            metric_ = metric.flatten(2).transpose(1, 2).repeat(1, 1, x_cam.shape[-1])
+             metric = torch.nn.functional.interpolate(input=metric, size=(H, W), mode='bilinear', align_corners=False)
+             # Metric [B, 1, N, C]
+             metric_ = rearrange(metric, 'b c h w -> b 1 (h w) c')
         for blk in self.block1:
             x_cam = blk(x_cam, H, W, metric_)
-        x1_cam = self.norm1(x_cam).reshape(B, H, W, -1).permute(0, 3, 1, 2)
+        
+        # Output: [B, 1, N, C] -> Norm -> [B, C, H, W]
+        x1_cam = self.norm1(x_cam)
+        x1_cam = rearrange(x1_cam, 'b 1 (h w) c -> b c h w', h=H, w=W)
         outs.append(x1_cam)
 
         # stage 2
         x_cam, H, W = self.patch_embed2(x1_cam)
         if metric is not None:
-            metric = torch.nn.functional.interpolate(input=metric, size=(H, W), mode='bilinear', align_corners=False)
-            metric_ = metric.flatten(2).transpose(1, 2).repeat(1, 1, x_cam.shape[-1])
+             metric = torch.nn.functional.interpolate(input=metric, size=(H, W), mode='bilinear', align_corners=False)
+             metric_ = rearrange(metric, 'b c h w -> b 1 (h w) c')
         for blk in self.block2:
             x_cam = blk(x_cam, H, W, metric_)
-        x2_cam = self.norm2(x_cam).reshape(B, H, W, -1).permute(0, 3, 1, 2)
+        x2_cam = self.norm2(x_cam)
+        x2_cam = rearrange(x2_cam, 'b 1 (h w) c -> b c h w', h=H, w=W)
         outs.append(x2_cam)
 
         # stage 3
         x_cam, H, W = self.patch_embed3(x2_cam)
         if metric is not None:
-            metric = torch.nn.functional.interpolate(input=metric, size=(H, W), mode='bilinear', align_corners=False)
-            metric_ = metric.flatten(2).transpose(1, 2).repeat(1, 1, x_cam.shape[-1])
+             metric = torch.nn.functional.interpolate(input=metric, size=(H, W), mode='bilinear', align_corners=False)
+             metric_ = rearrange(metric, 'b c h w -> b 1 (h w) c')
         for blk in self.block3:
             x_cam = blk(x_cam, H, W, metric_)
-        x3_cam = self.norm3(x_cam).reshape(B, H, W, -1).permute(0, 3, 1, 2)
+        x3_cam = self.norm3(x_cam)
+        x3_cam = rearrange(x3_cam, 'b 1 (h w) c -> b c h w', h=H, w=W)
         outs.append(x3_cam)
 
         # stage 4
         x_cam, H, W = self.patch_embed4(x3_cam)
         if metric is not None:
-            metric = torch.nn.functional.interpolate(input=metric, size=(H, W), mode='bilinear', align_corners=False)
-            metric_ = metric.flatten(2).transpose(1, 2).repeat(1, 1, x_cam.shape[-1])
+             metric = torch.nn.functional.interpolate(input=metric, size=(H, W), mode='bilinear', align_corners=False)
+             metric_ = rearrange(metric, 'b c h w -> b 1 (h w) c')
         for blk in self.block4:
             x_cam = blk(x_cam, H, W, metric_)
-        x4_cam = self.norm4(x_cam).reshape(B, H, W, -1).permute(0, 3, 1, 2)
+        x4_cam = self.norm4(x_cam)
+        x4_cam = rearrange(x4_cam, 'b 1 (h w) c -> b c h w', h=H, w=W)
         outs.append(x4_cam)
 
         return outs
@@ -275,5 +339,5 @@ if __name__ == '__main__':
     # 实例化时可以控制 quantize 开关
     model = CMNeXt('B2', modals, quantize=True) 
     outs = model(x)
-    for y in outs:
-        print(f"Output shape: {y.shape}")
+    for i, y in enumerate(outs):
+        print(f"Stage {i} Output shape: {y.shape}")
