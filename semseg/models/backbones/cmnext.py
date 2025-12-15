@@ -14,8 +14,8 @@ if str(project_root) not in sys.path:
     sys.path.append(str(project_root))
 
 try:
-    from models.quantizer.net2quan import QuantizableLayer as Q
-    from models.quantizer.net2quan import QuanMMHead, QuanSoftmax, QuanConv, QuanLinear
+    from diffusers_dpm.models.quantizer.net2quan import QuantizableLayer as Q
+    from diffusers_dpm.models.quantizer.net2quan import QuanMMHead, QuanSoftmax, QuanConv, QuanLinear
 except ImportError as e:
     print(f"导入失败，请检查路径。当前 sys.path: {sys.path}")
     raise e
@@ -30,7 +30,7 @@ class Attention(nn.Module):
         
         # Linear 底层是 Conv2d，输入必须是 [B, C, H, W]
         self.q = Q.Linear(dim, dim, quantize=quantize)
-        self.k = Q.Linear(dim, dim, quantize=quantize)
+        self.k = Q.Linear(dim, dim, quantize=quantize)      # 原来是用一个层映射kv，然后5D分开，由于硬件不支持5D，因此这里做了修改，改为分别映射k和v。导入原来的权重时，把原来权重拆开赋值即可。
         self.v = Q.Linear(dim, dim, quantize=quantize)
         self.proj = Q.Linear(dim, dim, quantize=quantize)
 
