@@ -6,7 +6,7 @@ from torch import nn, Tensor
 from torch.nn import functional as F
 from semseg.models.layers import DropPath
 
-# ================= 路径修补 =================
+# ================= 路径修补 =================  ==
 current_file_path = Path(__file__).resolve()
 project_root = current_file_path.parents[4]
 if str(project_root) not in sys.path:
