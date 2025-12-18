@@ -30,7 +30,7 @@ class SegFormerHead(nn.Module):
     def __init__(self, dims: list, embed_dim: int = 256, num_classes: int = 19):
         super().__init__()
         for i, dim in enumerate(dims):
-            self.add_module(f"linear_c{i+1}", MLP(dim, embed_dim))
+            self.add_module(f"linear_c{i+1}", MLP(dim, embed_dim))  
 
         self.linear_fuse = ConvModule(embed_dim*4, embed_dim)
         self.linear_pred = nn.Conv2d(embed_dim, num_classes, 1)
@@ -45,3 +45,5 @@ class SegFormerHead(nn.Module):
         seg = self.linear_fuse(torch.cat(outs[::-1], dim=1))
         seg = self.linear_pred(self.dropout(seg))
         return seg
+    
+
