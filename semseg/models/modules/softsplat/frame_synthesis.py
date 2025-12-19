@@ -618,11 +618,8 @@ class Synthesis(torch.nn.Module):
 
                 for intLevel in range(len(tenEncone)):
                     tenMetricone = torch.nn.functional.interpolate(input=tenMetricone, size=(tenEncone[intLevel].shape[2], tenEncone[intLevel].shape[3]), mode='bilinear', align_corners=False)
-        
                     tenForward = torch.nn.functional.interpolate(input=tenForward, size=(tenEncone[intLevel].shape[2], tenEncone[intLevel].shape[3]), mode='bilinear', align_corners=False) * (float(tenEncone[intLevel].shape[3]) / float(tenForward.shape[3]))
-
                     tenIn=torch.cat([tenEncone[intLevel], tenMetricone], 1)
-
                     tenWarp = softsplat(tenIn=tenIn, tenFlow=tenForward, tenMetric=tenMetricone, strMode='linear')
 
                     tenOutput.append(
@@ -631,12 +628,6 @@ class Synthesis(torch.nn.Module):
                             # torch.cat([tenEncone[intLevel], tenEncone_event[intLevel], tenWarp], 1)
                             # torch.cat([tenEncone[intLevel], tenWarp], 1)
                             tenWarp
-                            # tenWarp, event_voxel, rgb
-                            # tenWarp, tenMetricone
-                            # tenWarp+tenIn
-                            # tenWarp + tenEncone[intLevel]
-                            # tenWarp + tenEncone_event[intLevel]
-                            # tenWarp + tenEncone[intLevel] + tenEncone_event[intLevel]
                         )
                     )
                 # end

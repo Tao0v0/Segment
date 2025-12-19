@@ -10,7 +10,7 @@ class ResidualBlock(nn.Module):
   
         self.conv1 = nn.Conv2d(in_planes, planes, kernel_size=3, padding=1, stride=stride)
         self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, padding=1)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.GELU()
 
         num_groups = planes // 8
 
@@ -21,10 +21,10 @@ class ResidualBlock(nn.Module):
                 self.norm3 = nn.GroupNorm(num_groups=num_groups, num_channels=planes)
         
         elif norm_fn == 'batch':
-            self.norm1 = nn.BatchNorm2d(planes)
-            self.norm2 = nn.BatchNorm2d(planes)
+            self.norm1 = nn.GroupNorm(1, planes)
+            self.norm2 = nn.GroupNorm(1, planes)
             if not stride == 1:
-                self.norm3 = nn.BatchNorm2d(planes)
+                self.norm3 = nn.GroupNorm(1, planes)
         
         elif norm_fn == 'instance':
             self.norm1 = nn.InstanceNorm2d(planes)
@@ -64,7 +64,7 @@ class BottleneckBlock(nn.Module):
         self.conv1 = nn.Conv2d(in_planes, planes//4, kernel_size=1, padding=0)
         self.conv2 = nn.Conv2d(planes//4, planes//4, kernel_size=3, padding=1, stride=stride)
         self.conv3 = nn.Conv2d(planes//4, planes, kernel_size=1, padding=0)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.GELU()
 
         num_groups = planes // 8
 
@@ -76,11 +76,11 @@ class BottleneckBlock(nn.Module):
                 self.norm4 = nn.GroupNorm(num_groups=num_groups, num_channels=planes)
         
         elif norm_fn == 'batch':
-            self.norm1 = nn.BatchNorm2d(planes//4)
-            self.norm2 = nn.BatchNorm2d(planes//4)
-            self.norm3 = nn.BatchNorm2d(planes)
+            self.norm1 = nn.GroupNorm(1, planes//4)
+            self.norm2 = nn.GroupNorm(1, planes//4)
+            self.norm3 = nn.GroupNorm(1, planes)
             if not stride == 1:
-                self.norm4 = nn.BatchNorm2d(planes)
+                self.norm4 = nn.GroupNorm(1, planes)
         
         elif norm_fn == 'instance':
             self.norm1 = nn.InstanceNorm2d(planes//4)
@@ -126,7 +126,7 @@ class BasicEncoder(nn.Module):
             self.norm1 = nn.GroupNorm(num_groups=8, num_channels=64)
             
         elif self.norm_fn == 'batch':
-            self.norm1 = nn.BatchNorm2d(64)
+            self.norm1 = nn.GroupNorm(1, 64)
 
         elif self.norm_fn == 'instance':
             self.norm1 = nn.InstanceNorm2d(64)
@@ -135,7 +135,7 @@ class BasicEncoder(nn.Module):
             self.norm1 = nn.Sequential()
 
         self.conv1 = nn.Conv2d(n_first_channels, dims[0], kernel_size=7, stride=2, padding=3)
-        self.relu1 = nn.ReLU(inplace=True)
+        self.relu1 = nn.GELU()
         
         self.in_planes = dims[0]
         self.layer1 = self._make_layer(dims[1],  stride=1)

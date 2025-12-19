@@ -23,8 +23,8 @@ def bilinear_sampler(img, coords, mode='bilinear', mask=False):
 
 def coords_grid(batch, ht, wd):
     coords = torch.meshgrid(torch.arange(ht), torch.arange(wd))
-    coords = torch.stack(coords[::-1], dim=0).float()
-    return coords[None].repeat(batch, 1, 1, 1)
+    coords = torch.stack(coords[::-1], dim=0).float()   # 把序列反过来(yy,xx) -> (xx,yy) ，meshgrid会生成两个列表，列表yy表示每个网格点的y坐标值，xx表示每个坐标的x坐标值
+    return coords[None].repeat(batch, 1, 1, 1)      # coords(2,H,W), coords[None]相当于coords.unsqueeze(0)，。reapt按第0维复制batch次，后面不复制，
 
 
 def upflowX(flow, mode='bilinear', X=8):

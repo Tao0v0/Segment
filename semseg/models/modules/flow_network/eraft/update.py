@@ -8,7 +8,7 @@ class FlowHead(nn.Module):
         super(FlowHead, self).__init__()
         self.conv1 = nn.Conv2d(input_dim, hidden_dim, 3, padding=1)
         self.conv2 = nn.Conv2d(hidden_dim, 2, 3, padding=1)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.GELU()
 
     def forward(self, x):
         return self.conv2(self.relu(self.conv1(x)))
@@ -89,14 +89,14 @@ class BasicMotionEncoder(nn.Module):
         
 
     def forward(self, flow, corr):
-        cor = F.relu(self.convc1(corr))
+        cor = F.gelu(self.convc1(corr))
         if self.raft_type == 'large':
-            cor = F.relu(self.convc2(cor))
-        flo = F.relu(self.convf1(flow))
-        flo = F.relu(self.convf2(flo))
+            cor = F.gelu(self.convc2(cor))
+        flo = F.gelu(self.convf1(flow))
+        flo = F.gelu(self.convf2(flo))
 
         cor_flo = torch.cat([cor, flo], dim=1)
-        out = F.relu(self.conv(cor_flo))
+        out = F.gelu(self.conv(cor_flo))
         return torch.cat([out, flow], dim=1)
 
 
@@ -112,7 +112,7 @@ class BasicUpdateBlock(nn.Module):
             self.flow_head = FlowHead(hidden_dim, hidden_dim=256)
             self.mask = nn.Sequential(
                 nn.Conv2d(128, 256, 3, padding=1),
-                nn.ReLU(inplace=True),
+                nn.GELU(),
                 nn.Conv2d(256, 64*9, 1, padding=0))
         elif self.raft_type == 'small':
             self.gru = ConvGRU(hidden_dim=hidden_dim, input_dim=82+64)
@@ -133,6 +133,5 @@ class BasicUpdateBlock(nn.Module):
         elif self.raft_type == 'small':
             mask = None
         return net, mask, delta_flow
-
 
 
