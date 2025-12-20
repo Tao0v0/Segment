@@ -4,6 +4,19 @@ import torch.nn.functional as F
 # from model.network_blocks import RecurrentResidualBlock
 from torch.nn import init
 
+
+class LayerNorm2d(nn.Module):
+    def __init__(self, num_channels: int, eps: float = 1e-5, elementwise_affine: bool = True) -> None:
+        super().__init__()
+        self.ln = nn.LayerNorm(num_channels, eps=eps, elementwise_affine=elementwise_affine)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, C, H, W) -> LayerNorm over channels (C) per spatial location
+        x = x.permute(0, 2, 3, 1).contiguous()  # (B, H, W, C)
+        x = self.ln(x)
+        return x.permute(0, 3, 1, 2).contiguous()
+
+
 class ResidualBlock(nn.Module):
     def __init__(self, in_planes, planes, norm_fn='group', stride=1):
         super(ResidualBlock, self).__init__()
@@ -21,10 +34,16 @@ class ResidualBlock(nn.Module):
                 self.norm3 = nn.GroupNorm(num_groups=num_groups, num_channels=planes)
         
         elif norm_fn == 'batch':
-            self.norm1 = nn.GroupNorm(1, planes)
-            self.norm2 = nn.GroupNorm(1, planes)
+            self.norm1 = nn.BatchNorm2d(planes)
+            self.norm2 = nn.BatchNorm2d(planes)
             if not stride == 1:
-                self.norm3 = nn.GroupNorm(1, planes)
+                self.norm3 = nn.BatchNorm2d(planes)
+
+        elif norm_fn in ('layer', 'layernorm'):
+            self.norm1 = LayerNorm2d(planes)
+            self.norm2 = LayerNorm2d(planes)
+            if not stride == 1:
+                self.norm3 = LayerNorm2d(planes)
         
         elif norm_fn == 'instance':
             self.norm1 = nn.InstanceNorm2d(planes)
@@ -76,11 +95,18 @@ class BottleneckBlock(nn.Module):
                 self.norm4 = nn.GroupNorm(num_groups=num_groups, num_channels=planes)
         
         elif norm_fn == 'batch':
-            self.norm1 = nn.GroupNorm(1, planes//4)
-            self.norm2 = nn.GroupNorm(1, planes//4)
-            self.norm3 = nn.GroupNorm(1, planes)
+            self.norm1 = nn.BatchNorm2d(planes//4)
+            self.norm2 = nn.BatchNorm2d(planes//4)
+            self.norm3 = nn.BatchNorm2d(planes)
             if not stride == 1:
-                self.norm4 = nn.GroupNorm(1, planes)
+                self.norm4 = nn.BatchNorm2d(planes)
+
+        elif norm_fn in ('layer', 'layernorm'):
+            self.norm1 = LayerNorm2d(planes//4)
+            self.norm2 = LayerNorm2d(planes//4)
+            self.norm3 = LayerNorm2d(planes)
+            if not stride == 1:
+                self.norm4 = LayerNorm2d(planes)
         
         elif norm_fn == 'instance':
             self.norm1 = nn.InstanceNorm2d(planes//4)
@@ -126,7 +152,10 @@ class BasicEncoder(nn.Module):
             self.norm1 = nn.GroupNorm(num_groups=8, num_channels=64)
             
         elif self.norm_fn == 'batch':
-            self.norm1 = nn.GroupNorm(1, 64)
+            self.norm1 = nn.BatchNorm2d(64)
+
+        elif self.norm_fn in ('layer', 'layernorm'):
+            self.norm1 = LayerNorm2d(64)
 
         elif self.norm_fn == 'instance':
             self.norm1 = nn.InstanceNorm2d(64)
@@ -152,7 +181,7 @@ class BasicEncoder(nn.Module):
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            elif isinstance(m, (nn.BatchNorm2d, nn.InstanceNorm2d, nn.GroupNorm)):
+            elif isinstance(m, (nn.BatchNorm2d, nn.InstanceNorm2d, nn.GroupNorm, nn.LayerNorm)):
                 if m.weight is not None:
                     nn.init.constant_(m.weight, 1)
                 if m.bias is not None:

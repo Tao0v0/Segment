@@ -26,17 +26,17 @@ class CorrBlock:
             corr = F.avg_pool2d(corr, 2, stride=2)
             self.corr_pyramid.append(corr)
 
-    def __call__(self, coords):
+    def __call__(self, coords):     #  corr_fn = CorrBlock(fmap1, fmap2, num_levels=4, radius=4)   调用corr函数    corr_feat = corr_fn(coords) 调用call
         r = self.radius
-        coords = coords.permute(0, 2, 3, 1)
+        coords = coords.permute(0, 2, 3, 1)  #(N,2,H,W) -> (N,H,W,2)
         batch, h1, w1, _ = coords.shape
 
         out_pyramid = []
-        for i in range(self.num_levels):
+        for i in range(self.num_levels): # 4
             corr = self.corr_pyramid[i]
-            dx = torch.linspace(-r, r, 2*r+1)
-            dy = torch.linspace(-r, r, 2*r+1)
-            delta = torch.stack(torch.meshgrid(dy, dx), axis=-1).to(coords.device)
+            dx = torch.linspace(-r, r, 2*r+1)       #假如r是4，那么就是[-4,-3,-2,-1,0,1,2,3,4] 固定的
+            dy = torch.linspace(-r, r, 2*r+1)       #假如r是4，那么就是[-4,-3,-2,-1,0,1,2,3,4] 固定的
+            delta = torch.stack(torch.meshgrid(dy, dx), axis=-1).to(coords.device) # 产出(K,K) ,stack成(K,K,2)
 
             centroid_lvl = coords.reshape(batch*h1*w1, 1, 1, 2) / 2**i
             delta_lvl = delta.view(1, 2*r+1, 2*r+1, 2)
@@ -52,7 +52,7 @@ class CorrBlock:
     @staticmethod
     def corr(fmap1, fmap2):
         batch, dim, ht, wd = fmap1.shape
-        fmap1 = fmap1.view(batch, dim, ht*wd)
+        fmap1 = fmap1.view(batch, dim, ht*wd)       # 展开
         fmap2 = fmap2.view(batch, dim, ht*wd) 
         
         corr = torch.matmul(fmap1.transpose(1,2), fmap2)

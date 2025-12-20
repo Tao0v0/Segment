@@ -56,7 +56,7 @@ class ERAFT(nn.Module):
             # feature network, context network, and update block
             self.fnet = BasicEncoder(dims=(64, 64, 96, 128, 256), norm_fn='instance', dropout=0,
                                         n_first_channels=n_first_channels)
-            self.cnet = BasicEncoder(dims=(64, 64, 96, 128, 256), norm_fn='batch', dropout=0,
+            self.cnet = BasicEncoder(dims=(64, 64, 96, 128, 256), norm_fn='layer', dropout=0,
                                         n_first_channels=n_first_channels)
             self.update_block = BasicUpdateBlock(self.args, hidden_dim=hdim, raft_type=self.raft_type)
         elif self.raft_type == 'small':
@@ -72,10 +72,10 @@ class ERAFT(nn.Module):
                                         n_first_channels=n_first_channels, raft_type=self.raft_type)
             self.update_block = BasicUpdateBlock(self.args, hidden_dim=hdim, raft_type=self.raft_type)
         self.iters = 12
-    def freeze_bn(self):
-        for m in self.modules():
-            if isinstance(m, nn.BatchNorm2d):
-                m.eval()
+    # def freeze_bn(self):
+    #     for m in self.modules():
+    #         if isinstance(m, nn.BatchNorm2d):
+    #             m.eval()
 
     def initialize_flow(self, img):
         """ Flow is represented as difference between two coordinate grids flow = coords1 - coords0"""
@@ -130,7 +130,7 @@ class ERAFT(nn.Module):
             cnet = self.cnet(event2)
             net, inp = torch.split(cnet, [hdim, cdim], dim=1)   # 在dim =1 上，按照hdim 和 cdim长度进行切分 net：[B, hdim, H, W]作为GRU的更新块  inp：[B, cdim, H, W]作为GRU的上下文输入
             net = torch.tanh(net)
-            inp = torch.relu(inp)
+            inp = F.gelu(inp)
 
         # Initialize Grids. First channel: x, 2nd channel: y. Image is just used to get the shape
         coords0, coords1 = self.initialize_flow(event1)    # 没有对event做改变，只是用event1的形状（N,C,H,W）生成两张相同的坐标网格，1/8分辨率，每个坐标shape(N,2,H/8,W/8)
