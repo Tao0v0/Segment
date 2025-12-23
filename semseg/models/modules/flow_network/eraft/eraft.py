@@ -72,6 +72,17 @@ class ERAFT(nn.Module):
                                         n_first_channels=n_first_channels, raft_type=self.raft_type)
             self.update_block = BasicUpdateBlock(self.args, hidden_dim=hdim, raft_type=self.raft_type)
         self.iters = 12
+
+        # Parameter-free 3x3 "unfold" kernel for hardware-friendly upsampling (keeps tensors 4D).
+        # Shape matches grouped conv2d with groups=2: (2*9, 1, 3, 3).
+        unfold_w = torch.zeros(18, 1, 3, 3, dtype=torch.float32)
+        out_idx = 0
+        for _ in range(2):  # two flow channels (u,v) handled via groups=2
+            for ky in range(3):
+                for kx in range(3):
+                    unfold_w[out_idx, 0, ky, kx] = 1.0
+                    out_idx += 1
+        self.register_buffer("_flow_unfold3x3_weight", unfold_w, persistent=False)
     # def freeze_bn(self):
     #     for m in self.modules():
     #         if isinstance(m, nn.BatchNorm2d):
@@ -95,10 +106,32 @@ class ERAFT(nn.Module):
         up_flow = F.unfold(8 * flow, [3,3], padding=1)  # 先解释 为什么乘 8：低分辨率上的光流是以特征网格为单位（步长=8个原图像素）；要变回原图单位，需要把位移放大 8 倍。
         up_flow = up_flow.view(N, 2, 9, 1, 1, H, W)     # F.unfold(x, [3,3], padding=1)：对 x ∈ [N, C, H, W] 提取滑动 3×3 块（步长=1），输出形状 [N, C*9, H*W]。
                                                         # 这里 x = 8*flow, C=2，所以得到 [N, 18, H*W]，其中每个位置收集了3×3 邻域的 2 通道光流。
-        up_flow = torch.sum(mask * up_flow, dim=2)
+        up_flow = torch.sum(mask * up_flow, dim=2)      # 用预测的权重mask 对 9 个邻域光流进行加权求和，得到每个高分辨率像素的光流估计，形状 [N, 2, 1, 1, H, W]
         up_flow = up_flow.permute(0, 1, 4, 2, 5, 3)
         return up_flow.reshape(N, 2, 8*H, 8*W)
 
+
+    def upsample_flow_4d(self, flow: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Convex upsampling that keeps all intermediate tensors strictly 4D (B,C,H,W).
+
+        Equivalent to `upsample_flow()` but avoids reshaping to >4D/3D, which can help
+        some deployment backends that only support 4D tensors.
+        """
+        # mask: (B, 64*9, H, W) -> (B, 9, H*8, W*8)
+        mask_hr = F.pixel_shuffle(mask, 8)
+        mask_hr = torch.softmax(mask_hr, dim=1)
+
+        # flow: (B, 2, H, W) -> (B, 18, H, W) via grouped conv (3x3 "unfold"), then to (B, 18, H*8, W*8).
+        w = self._flow_unfold3x3_weight.to(device=flow.device, dtype=flow.dtype)            # w现在是常数，外部输入
+        patches_lr = F.conv2d(8.0 * flow, w, bias=None, stride=1, padding=1, groups=2)
+        patches_hr = F.interpolate(patches_lr, scale_factor=8, mode="nearest")
+
+        # Weighted sum over 9 neighbors (keepdim=True keeps everything 4D).
+        patches_u = patches_hr[:, :9]
+        patches_v = patches_hr[:, 9:]
+        flow_u = (mask_hr * patches_u).sum(dim=1, keepdim=True)
+        flow_v = (mask_hr * patches_v).sum(dim=1, keepdim=True)
+        return torch.cat([flow_u, flow_v], dim=1)
 
     def forward(self, event1, event2, flow_init=None, upsample=True):
         """ Estimate optical flow between pair of frames """
@@ -153,7 +186,7 @@ class ERAFT(nn.Module):
                 if self.raft_type == 'small':
                     flow_up = upflowX(coords1 - coords0, X=8)
             else:   
-                flow_up = self.upsample_flow(coords1 - coords0, up_mask)
+                flow_up = self.upsample_flow_4d(coords1 - coords0, up_mask)
                 # flow_up = upflowX(coords1 - coords0, X=8)
 
             flow_predictions.append(self.image_padder.unpad(flow_up))

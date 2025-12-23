@@ -93,7 +93,7 @@ class ImagePadder(object):
     # and if not, it pads the image accordingly.                          #
     # =================================================================== #
 
-    def __init__(self, min_size=64, mode: str = "replicate", value: float = 0.0):
+    def __init__(self, min_size=64, mode: str = "replicate", value: float = 0.0):   #原来的代码仅左、上填充	，现在四周对称填充（图像居中）。原来的填充内容只能填0，现在支持复制边缘
         # --------------------------------------------------------------- #
         # The min_size additionally ensures, that the smallest image      #
         # does not get too small                                          #
