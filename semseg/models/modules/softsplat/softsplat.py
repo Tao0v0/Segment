@@ -243,7 +243,7 @@ def softsplat(tenIn:torch.Tensor, tenFlow:torch.Tensor, tenMetric:torch.Tensor, 
         tenIn = torch.cat([tenIn, tenIn.new_ones([tenIn.shape[0], 1, tenIn.shape[2], tenIn.shape[3]])], 1)
 
     elif strMode.split('-')[0] == 'linear':
-        tenIn = torch.cat([tenIn * tenMetric, tenMetric], 1)
+        tenIn = torch.cat([tenIn * tenMetric, tenMetric], 1) # B 1 H W  / B C H W
 
     elif strMode.split('-')[0] == 'soft':
         tenIn = torch.cat([tenIn * tenMetric.clip(None, 20.0).exp(), tenMetric.clip(None, 20.0).exp()], 1)
@@ -251,7 +251,7 @@ def softsplat(tenIn:torch.Tensor, tenFlow:torch.Tensor, tenMetric:torch.Tensor, 
 
     # end
 
-    tenOut = softsplat_func.apply(tenIn, tenFlow)
+    tenOut = softsplat_func.apply(tenIn, tenFlow) #B 2 H W
 
     if strMode.split('-')[0] in ['avg', 'linear', 'soft']:
         tenNormalize = tenOut[:, -1:, :, :]

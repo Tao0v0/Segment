@@ -44,7 +44,7 @@ class ERAFT(nn.Module):
         args = get_args()       # 当输入python eraft.py --lr 0.0005 --batch_size 4 时，会返回指定的参数 lr 和 batchsize
         self.args = args
         self.raft_type = 'large'
-        self.image_padder = ImagePadder(min_size=32)
+        self.image_padder = ImagePadder(min_size=32, mode="replicate")
 
         if self.raft_type == 'large':
             self.hidden_dim = hdim = 128
@@ -54,7 +54,7 @@ class ERAFT(nn.Module):
             self.iters = 12
 
             # feature network, context network, and update block
-            self.fnet = BasicEncoder(dims=(64, 64, 96, 128, 256), norm_fn='instance', dropout=0,
+            self.fnet = BasicEncoder(dims=(64, 64, 96, 128, 256), norm_fn='layer', dropout=0,
                                         n_first_channels=n_first_channels)
             self.cnet = BasicEncoder(dims=(64, 64, 96, 128, 256), norm_fn='layer', dropout=0,
                                         n_first_channels=n_first_channels)
@@ -104,63 +104,59 @@ class ERAFT(nn.Module):
         """ Estimate optical flow between pair of frames """
 
         # Pad Image (for flawless up&downsampling)
-        event1 = self.image_padder.pad(event1)
+        event1 = self.image_padder.pad(event1)          # 调用nn.zeroPad2d
         event2 = self.image_padder.pad(event2)
 
-        event1 = event1.contiguous()
+        event1 = event1.contiguous()                    # 把 event1 这个张量在内存里变成“连续存储”的布局（contiguous）
         event2 = event2.contiguous()
 
-        # event1 = F.interpolate(event1, scale_factor=0.5, mode='bilinear', align_corners=False)
-        # event2 = F.interpolate(event2, scale_factor=0.5, mode='bilinear', align_corners=False)
 
         hdim = self.hidden_dim  # 96
         cdim = self.context_dim # 64
 
         # run the feature network
-        with autocast(enabled=self.args.mixed_precision):
+        with autocast(enabled=self.args.mixed_precision):       # 混合精度训练，但实际不会用混合精度
             fmap1, fmap2 = self.fnet([event1, event2])
         
-        fmap1 = fmap1.float()
+        fmap1 = fmap1.float()       # 没开混合精度就是多余的，但为了保险起见，还是转成float32
         fmap2 = fmap2.float()
 
         corr_fn = CorrBlock(fmap1, fmap2, radius=self.args.corr_radius)
 
         # run the context network
-        with autocast(enabled=self.args.mixed_precision):
+        with autocast(enabled=self.args.mixed_precision):       # 实际不会用混合精度
             cnet = self.cnet(event2)
             net, inp = torch.split(cnet, [hdim, cdim], dim=1)   # 在dim =1 上，按照hdim 和 cdim长度进行切分 net：[B, hdim, H, W]作为GRU的更新块  inp：[B, cdim, H, W]作为GRU的上下文输入
             net = torch.tanh(net)
             inp = F.gelu(inp)
 
-        # Initialize Grids. First channel: x, 2nd channel: y. Image is just used to get the shape
+        # 这里初始化的coords0 和 coords1 是 1/8 分辨率的坐标网格,现在是一样的
         coords0, coords1 = self.initialize_flow(event1)    # 没有对event做改变，只是用event1的形状（N,C,H,W）生成两张相同的坐标网格，1/8分辨率，每个坐标shape(N,2,H/8,W/8)
 
-        if flow_init is not None:
+        if flow_init is not None:       # 不执行
             coords1 = coords1 + flow_init
 
         flow_predictions = []
         for itr in range(self.iters):       # self/iters = 12
             coords1 = coords1.detach()
-            corr = corr_fn(coords1) # index correlation volume   把(N,2,H,W)的网格坐标变为 一张特征相关图 （B,L*K*K,H,W)  K = 2r+1
+            corr = corr_fn(coords1) # index correlation volume   把(N,2,H,W)的网格坐标变为 一张特征相关图 （B,L*K*K,H,W)  K = 2r+1，有除法
 
             flow = coords1 - coords0
             with autocast(enabled=self.args.mixed_precision):
-                net, up_mask, delta_flow = self.update_block(net, inp, corr, flow)
+                net, up_mask, delta_flow = self.update_block(net, inp, corr, flow)  # net来自cnet的hidden，inp来自cnet的context，corr是相关特征，flow是当前光流
 
             # F(t+1) = F(t) + \Delta(t)
             coords1 = coords1 + delta_flow
 
-            # upsample predictions   up_mask 不是None,要执行 upsample_flow
+            # up_mask 不是None,要执行 upsample_flow
             if up_mask is None:      
                 if self.raft_type == 'small':
                     flow_up = upflowX(coords1 - coords0, X=8)
-            else:
+            else:   
                 flow_up = self.upsample_flow(coords1 - coords0, up_mask)
-                # flow_up = upflowX(flow_up, X=2)
+                # flow_up = upflowX(coords1 - coords0, X=8)
 
-            # flow_predictions.append(flow_up)
             flow_predictions.append(self.image_padder.unpad(flow_up))
-        # print("Flow predictions: ", flow_predictions[-1].mean())
 
-        # return flow_predictions
-        return coords1 - coords0, flow_predictions
+        return coords1 - coords0, flow_predictions      
+        # 返回低分辨1/8分辨率光流（N,2,H/8,W/8） 和 高分辨率光流列表 [(N,2,H,W), ...]12个元素，最后一项是全分辨率输出

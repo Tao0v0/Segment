@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from .utils import bilinear_sampler, coords_grid
 
@@ -7,6 +8,28 @@ try:
 except:
     # alt_cuda_corr is not compiled
     pass
+
+
+class AvgPool2dAsConv(nn.Module):
+    """AvgPool2d implemented via depthwise Conv2d (parameter-free).
+
+    This is mathematically equivalent to average pooling when padding=0 and ceil_mode=False.
+    """
+
+    def __init__(self, kernel_size: int = 2, stride: int = 2) -> None:
+        super().__init__()
+        self.kernel_size = int(kernel_size)
+        self.stride = int(stride)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        k = self.kernel_size
+        c = x.shape[1]
+        weight = x.new_ones((c, 1, k, k))
+        y = F.conv2d(x, weight, stride=self.stride, padding=0, groups=c)
+        return y * (1.0 / float(k * k))
+
+
+_avg_pool2x2_s2 = AvgPool2dAsConv(kernel_size=2, stride=2)
 
 
 class CorrBlock:
@@ -23,7 +46,7 @@ class CorrBlock:
         
         self.corr_pyramid.append(corr)
         for i in range(self.num_levels-1):
-            corr = F.avg_pool2d(corr, 2, stride=2)
+            corr = _avg_pool2x2_s2(corr)
             self.corr_pyramid.append(corr)
 
     def __call__(self, coords):     #  corr_fn = CorrBlock(fmap1, fmap2, num_levels=4, radius=4)   调用corr函数    corr_feat = corr_fn(coords) 调用call

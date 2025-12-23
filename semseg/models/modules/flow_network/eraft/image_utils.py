@@ -1,6 +1,7 @@
 import numpy
 import torch
 from torch import nn
+import torch.nn.functional as F
 from torch.nn.functional import grid_sample
 from scipy.spatial import transform
 from scipy import interpolate
@@ -92,32 +93,49 @@ class ImagePadder(object):
     # and if not, it pads the image accordingly.                          #
     # =================================================================== #
 
-    def __init__(self, min_size=64):
+    def __init__(self, min_size=64, mode: str = "replicate", value: float = 0.0):
         # --------------------------------------------------------------- #
         # The min_size additionally ensures, that the smallest image      #
         # does not get too small                                          #
         # --------------------------------------------------------------- #
-        self.min_size = min_size
-        self.pad_height = None
-        self.pad_width = None
+        self.min_size = int(min_size)
+        self.mode = str(mode)
+        self.value = float(value)
+        self._pad = None  # (left, right, top, bottom)
 
     def pad(self, image):
-        # --------------------------------------------------------------- #
-        # If necessary, this function pads the image on the left & top    #
-        # --------------------------------------------------------------- #
+        """Pad image to multiples of `min_size` (symmetric padding).
+
+        RAFT-style padding is important for clean borders. Using `mode="replicate"`
+        usually avoids zero-padding artifacts at the edges.
+        """
         height, width = image.shape[-2:]
-        if self.pad_width is None:
-            self.pad_height = (self.min_size - height % self.min_size)%self.min_size
-            self.pad_width = (self.min_size - width % self.min_size)%self.min_size
-        else:
-            pad_height = (self.min_size - height % self.min_size)%self.min_size
-            pad_width = (self.min_size - width % self.min_size)%self.min_size
-            if pad_height != self.pad_height or pad_width != self.pad_width:
-                raise
-        return nn.ZeroPad2d((self.pad_width, 0, self.pad_height, 0))(image)
+        pad_h = (self.min_size - height % self.min_size) % self.min_size
+        pad_w = (self.min_size - width % self.min_size) % self.min_size
+        pad_top = pad_h // 2
+        pad_bottom = pad_h - pad_top
+        pad_left = pad_w // 2
+        pad_right = pad_w - pad_left
+        pad = (pad_left, pad_right, pad_top, pad_bottom)
+
+        if self._pad is None:
+            self._pad = pad
+        elif pad != self._pad:
+            raise ValueError(f"Inconsistent pad sizes: expected {self._pad}, got {pad}")
+
+        if pad_left == pad_right == pad_top == pad_bottom == 0:
+            return image
+        if self.mode == "constant":
+            return F.pad(image, pad, mode="constant", value=self.value)
+        return F.pad(image, pad, mode=self.mode)
 
     def unpad(self, image):
-        # --------------------------------------------------------------- #
-        # Removes the padded rows & columns                               #
-        # --------------------------------------------------------------- #
-        return image[..., self.pad_height:, self.pad_width:]
+        """Remove padding added by `pad()`."""
+        if self._pad is None:
+            return image
+        pad_left, pad_right, pad_top, pad_bottom = self._pad
+        y1 = pad_top
+        y2 = None if pad_bottom == 0 else -pad_bottom
+        x1 = pad_left
+        x2 = None if pad_right == 0 else -pad_right
+        return image[..., y1:y2, x1:x2]

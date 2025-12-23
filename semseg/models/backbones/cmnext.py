@@ -206,7 +206,7 @@ class PatchEmbed(nn.Module):
             c1, c2, kernel_size=patch_size, stride=stride, padding=padding, quantize=quantize
         )
         self.norm = Q.LayerNorm(c2, quantize=quantize)
-
+    # B C H W  /  B H W C 
     def forward(self, x: Tensor) -> Tensor:
         # x: [B, 3, H_in, W_in]
         x = self.proj(x) # -> [B, C, H, W]

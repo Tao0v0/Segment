@@ -124,8 +124,8 @@ class BasicUpdateBlock(nn.Module):
         motion_features = self.encoder(flow, corr)
         inp = torch.cat([inp, motion_features], dim=1)
 
-        net = self.gru(net, inp)
-        delta_flow = self.flow_head(net)
+        net = self.gru(net, inp)            # 正常  cat sigmoid tanh
+        delta_flow = self.flow_head(net)    # 正常 conv-<gelu>-conv
 
         if self.raft_type == 'large':
             # scale mask to balance gradients

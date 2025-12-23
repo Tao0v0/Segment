@@ -98,7 +98,7 @@ class QuanGELU(nn.GELU):
         #=============================================
         device = input.device
         # fp func
-        func = nn.GELU(approximate='tanh')
+        func = nn.GELU(approximate='tanh')      # 
         # pwl func
         scale = scale_x
         decimal_bit = -torch.log2(scale).int().item() 
