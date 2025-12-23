@@ -45,6 +45,7 @@ class ERAFT(nn.Module):
         self.args = args
         self.raft_type = 'large'
         self.image_padder = ImagePadder(min_size=32, mode="replicate")
+        self.gelu = nn.GELU()
 
         if self.raft_type == 'large':
             self.hidden_dim = hdim = 128
@@ -161,7 +162,7 @@ class ERAFT(nn.Module):
             cnet = self.cnet(event2)
             net, inp = torch.split(cnet, [hdim, cdim], dim=1)   # 在dim =1 上，按照hdim 和 cdim长度进行切分 net：[B, hdim, H, W]作为GRU的更新块  inp：[B, cdim, H, W]作为GRU的上下文输入
             net = torch.tanh(net)
-            inp = F.gelu(inp)
+            inp = self.gelu(inp)
 
         # 这里初始化的coords0 和 coords1 是 1/8 分辨率的坐标网格,现在是一样的
         coords0, coords1 = self.initialize_flow(event1)    # 没有对event做改变，只是用event1的形状（N,C,H,W）生成两张相同的坐标网格，1/8分辨率，每个坐标shape(N,2,H/8,W/8)

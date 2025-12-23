@@ -74,6 +74,7 @@ class BasicMotionEncoder(nn.Module):
         super(BasicMotionEncoder, self).__init__()
         cor_planes = args.corr_levels * (2*args.corr_radius + 1)**2
         self.raft_type = raft_type
+        self.gelu = nn.GELU()
 
         if self.raft_type == 'large':
             self.convc1 = nn.Conv2d(cor_planes, 256, 1, padding=0)
@@ -89,14 +90,14 @@ class BasicMotionEncoder(nn.Module):
         
 
     def forward(self, flow, corr):
-        cor = F.gelu(self.convc1(corr))
+        cor = self.gelu(self.convc1(corr))
         if self.raft_type == 'large':
-            cor = F.gelu(self.convc2(cor))
-        flo = F.gelu(self.convf1(flow))
-        flo = F.gelu(self.convf2(flo))
+            cor = self.gelu(self.convc2(cor))
+        flo = self.gelu(self.convf1(flow))
+        flo = self.gelu(self.convf2(flo))
 
         cor_flo = torch.cat([cor, flo], dim=1)
-        out = F.gelu(self.conv(cor_flo))
+        out = self.gelu(self.conv(cor_flo))
         return torch.cat([out, flow], dim=1)
 
 
@@ -121,15 +122,15 @@ class BasicUpdateBlock(nn.Module):
 
 
     def forward(self, net, inp, corr, flow, upsample=True):
-        motion_features = self.encoder(flow, corr)
+        motion_features = self.encoder(flow, corr)          # corr: conv-gelu-conv-gelu  flow: conv-gelu-conv-gelu    cat-conv-gelu  cat
         inp = torch.cat([inp, motion_features], dim=1)
 
-        net = self.gru(net, inp)            # 正常  cat sigmoid tanh
-        delta_flow = self.flow_head(net)    # 正常 conv-<gelu>-conv
+        net = self.gru(net, inp)            # 正常  cat(net, inp) - conv -sigmoid - conv -sigmoid -cat - conv -tanh    shape:[B, hidden_dim, H, W]
+        delta_flow = self.flow_head(net)    # 正常 conv-<gelu>-conv     shape:[B, 2, H, W]
 
         if self.raft_type == 'large':
             # scale mask to balance gradients
-            mask = .25 * self.mask(net)
+            mask = .25 * self.mask(net)     # mask： conv-gelu-conv   shape:[B, 64*9, H/8, W/8]
         elif self.raft_type == 'small':
             mask = None
         return net, mask, delta_flow
