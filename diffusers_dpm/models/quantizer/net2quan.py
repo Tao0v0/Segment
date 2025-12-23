@@ -4,7 +4,7 @@ import torch
 # from diffusers.models.activations import GEGLU, GELU, ApproximateGELU, FP32SiLU, SwiGLU
 from einops import rearrange
 import torch.nn.functional as F
-from .quan_layer_annan_2 import QuanLayerNorm, LsqQuantizer4input, QuanMMHead, QuanSoftmax, QuanSigmoid, QuanGELU, QuanEMMul, LsqQuantizer4weight, LsqQuantizer4input, SymmetricQuantFunction
+from .quan_layer_annan_2 import QuanLayerNorm, LsqQuantizer4input, QuanMMHead, QuanSoftmax, QuanSigmoid, QuanGELU, QuanTanh, QuanEMMul, LsqQuantizer4weight, LsqQuantizer4input, SymmetricQuantFunction
 from .quan_layer_annan_2 import QuanConv, QuanLinear
 # from .NCQuan_layer import QuanConv, QuanLinear, set_ncq_init_param, set_ncqlora_init_param, NCQuantizer4input
 from .quan_layer_annan_2 import set_lsq_init_param, quantize_jit
@@ -419,7 +419,15 @@ class nn_GELU_Quan(QuanGELU):    # nn.GELU QuanGELU
         **kwargs
     ):
         super().__init__()   # 有一些GELU带近似，似乎影响不大，我给删了 # **kwargs
-    
+
+class nn_Tanh_Quan(QuanTanh):    # nn.Tanh QuanTanh
+    def __init__(
+        self,
+        **kwargs
+    ):
+        kwargs.pop('approximate', None)
+        super().__init__(**kwargs)
+
 class diff_GELU_Quan(nn.Module):    #GELU
     #     #这个相比nn的似乎还多了一个线性层
     def __init__(self, dim_in: int, dim_out: int, approximate: str = "none", bias: bool = True, **kwargs):
@@ -523,6 +531,14 @@ class QuantizableLayer:
     #         return diffusers.GELU(**kwargs)
 
     @staticmethod
+    def nn_Tanh(quantize, quan_kwargs={}, **kwargs):
+        """åˆ›å»ºnn.Tanhå±‚"""
+        if quantize:
+            return nn_Tanh_Quan(**{**kwargs, **quan_kwargs})
+        else:
+            return nn.Tanh()
+
+    @staticmethod
     def LayerNorm(normalized_shape, quantize, quan_kwargs={}, **kwargs):
         if quantize:
             return LayerNorm_Quan(normalized_shape, **{**kwargs, **quan_kwargs} )
@@ -562,5 +578,5 @@ class QuantizableLayer:
             return nn.Softmax(dim=dim)
         
     # 写一个upsample
-    # 写一个 tahn
+    # 写一个 tanh
 

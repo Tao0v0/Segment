@@ -123,6 +123,68 @@ class QuanGELU(nn.GELU):
         return (pwl_func * scale - func(input *scale)).detach() + func(input * scale) 
         # return F.gelu(input)
 
+class QuanTanh(nn.Tanh):
+    """docstring for QuanConv"""
+
+    def __init__(self, quan_input=True, nbit_a=8, mode='lsq', N=1, C=1):
+        super().__init__()
+        self.quan_input = quan_input
+        self.mode = mode
+        # PWL tanh approximation (7 seg points -> 8 segments)
+        self.seg_point = torch.tensor([-2.125, -1.25, -0.625, 0.0, 0.625, 1.25, 2.125])
+        self.coeff = torch.tensor([0.0, 0.140625, 0.46875, 0.890625, 0.890625, 0.46875, 0.140625, 0.0])
+        self.intercept = torch.tensor([-1.0, -0.671875, -0.265625, 0.0, 0.0, 0.265625, 0.671875, 1.0])
+        if self.quan_input:
+            self.nbit_a = nbit_a
+            if self.mode == 'lsq':
+                lsq_a = LsqQuantizer4input(bit=self.nbit_a, all_positive=False, per_channel=False)
+                self.quan_a = lsq_a
+            else:
+                raise NotImplementedError('Not implemented other quantization technique yet')
+
+    def forward(self, input, scale_x=None):
+        if not self.quan_input:
+            return super().forward(input)
+
+        input, scale_x, if_init = self.quan_a(input)
+
+        # During LSQ init, fall back to exact tanh.
+        if if_init:
+            return super().forward(input)
+
+        input = input / scale_x
+        device = input.device
+
+        scale = scale_x
+        decimal_bit = -torch.log2(scale).int().item()
+
+        seg_point_scale = self.seg_point.to(device)
+        self.coeff = self.coeff.to(device)
+        self.intercept = self.intercept.to(device)
+
+        intercept_scale = round_to_nearest_bits_torch(self.intercept, 6) / scale
+        coeff_scale = round_to_nearest_bits_torch(self.coeff, 6)
+
+        seg_point_scale = round_to_nearest_bits_torch(seg_point_scale, decimal_bit)
+        seg_point_scale = seg_point_scale / scale
+
+        pwl_func = torch.zeros_like(input, device=device)
+        mask = input.lt(seg_point_scale[0])
+        pwl_func = torch.where(mask, intercept_scale[0] + coeff_scale[0] * input, pwl_func)
+        for i in range(1, len(seg_point_scale)):
+            mask = input.ge(seg_point_scale[i - 1]) & input.lt(seg_point_scale[i])
+            pwl_func = torch.where(mask, intercept_scale[i] + coeff_scale[i] * input, pwl_func)
+        mask = input.ge(seg_point_scale[-1])
+        pwl_func = torch.where(mask, intercept_scale[-1] + coeff_scale[-1] * input, pwl_func)
+
+        pwl_out = torch.clamp(pwl_func * scale, -1.0, 1.0)
+
+        # Avoid emitting tanh during inference/export; keep STE behavior in training.
+        if self.training and torch.is_grad_enabled():
+            fp_out = super().forward(input * scale)
+            return (pwl_out - fp_out).detach() + fp_out
+        return pwl_out
+
 def round_to_nearest_bits_torch(x, decimal_bits):
     """
 
