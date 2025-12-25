@@ -46,6 +46,7 @@ class ERAFT(nn.Module):
         self.raft_type = 'large'
         self.image_padder = ImagePadder(min_size=32, mode="replicate")
         self.gelu = nn.GELU()
+        self.tanh = nn.Tanh()
 
         if self.raft_type == 'large':
             self.hidden_dim = hdim = 128
@@ -161,7 +162,7 @@ class ERAFT(nn.Module):
         with autocast(enabled=self.args.mixed_precision):       # 实际不会用混合精度
             cnet = self.cnet(event2)
             net, inp = torch.split(cnet, [hdim, cdim], dim=1)   # 在dim =1 上，按照hdim 和 cdim长度进行切分 net：[B, hdim, H, W]作为GRU的更新块  inp：[B, cdim, H, W]作为GRU的上下文输入
-            net = torch.tanh(net)
+            net = self.tanh(net)
             inp = self.gelu(inp)
 
         # 这里初始化的coords0 和 coords1 是 1/8 分辨率的坐标网格,现在是一样的

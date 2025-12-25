@@ -19,13 +19,14 @@ class ConvGRU(nn.Module):
         self.convz = nn.Conv2d(hidden_dim+input_dim, hidden_dim, 3, padding=1)
         self.convr = nn.Conv2d(hidden_dim+input_dim, hidden_dim, 3, padding=1)
         self.convq = nn.Conv2d(hidden_dim+input_dim, hidden_dim, 3, padding=1)
+        self.tanh = nn.Tanh()
 
     def forward(self, h, x):
         hx = torch.cat([h, x], dim=1)
 
         z = torch.sigmoid(self.convz(hx))
         r = torch.sigmoid(self.convr(hx))
-        q = torch.tanh(self.convq(torch.cat([r*h, x], dim=1)))
+        q = self.tanh(self.convq(torch.cat([r*h, x], dim=1)))
 
         h = (1-z) * h + z * q
         return h
@@ -35,6 +36,7 @@ class SepConvGRU(nn.Module):
         super(SepConvGRU, self).__init__()
 
         self.raft_type = raft_type
+        self.tanh = nn.Tanh()
         if self.raft_type == 'large':
             self.convz1 = nn.Conv2d(hidden_dim+input_dim, hidden_dim, (1,5), padding=(0,2))
             self.convr1 = nn.Conv2d(hidden_dim+input_dim, hidden_dim, (1,5), padding=(0,2))
@@ -55,7 +57,7 @@ class SepConvGRU(nn.Module):
         hx = torch.cat([h, x], dim=1)
         z = torch.sigmoid(self.convz1(hx))
         r = torch.sigmoid(self.convr1(hx))
-        q = torch.tanh(self.convq1(torch.cat([r*h, x], dim=1)))        
+        q = self.tanh(self.convq1(torch.cat([r*h, x], dim=1)))
         h = (1-z) * h + z * q
 
         if self.raft_type == 'large':
@@ -63,7 +65,7 @@ class SepConvGRU(nn.Module):
             hx = torch.cat([h, x], dim=1)
             z = torch.sigmoid(self.convz2(hx))
             r = torch.sigmoid(self.convr2(hx))
-            q = torch.tanh(self.convq2(torch.cat([r*h, x], dim=1)))       
+            q = self.tanh(self.convq2(torch.cat([r*h, x], dim=1)))
             h = (1-z) * h + z * q
 
         return h
