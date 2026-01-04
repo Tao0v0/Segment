@@ -428,6 +428,13 @@ class nn_Tanh_Quan(QuanTanh):    # nn.Tanh QuanTanh
         kwargs.pop('approximate', None)
         super().__init__(**kwargs)
 
+class nn_Sigmoid_Quan(QuanSigmoid):    # nn.Sigmoid QuanSigmoid
+    def __init__(
+        self,
+        **kwargs
+    ):
+        super().__init__(**kwargs)
+
 class diff_GELU_Quan(nn.Module):    #GELU
     #     #这个相比nn的似乎还多了一个线性层
     def __init__(self, dim_in: int, dim_out: int, approximate: str = "none", bias: bool = True, **kwargs):
@@ -537,6 +544,16 @@ class QuantizableLayer:
             return nn_Tanh_Quan(**{**kwargs, **quan_kwargs})
         else:
             return nn.Tanh()
+
+    @staticmethod
+    def nn_Sigmoid(quantize, quan_kwargs={}, **kwargs):
+        if quantize:
+            return nn_Sigmoid_Quan(**{**kwargs, **quan_kwargs})
+        return nn.Sigmoid()
+
+    @staticmethod
+    def nn_sigmoid(quantize, quan_kwargs={}, **kwargs):
+        return QuantizableLayer.nn_Sigmoid(quantize=quantize, quan_kwargs=quan_kwargs, **kwargs)
 
     @staticmethod
     def LayerNorm(normalized_shape, quantize, quan_kwargs={}, **kwargs):

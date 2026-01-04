@@ -51,6 +51,10 @@ class QuanSigmoid(nn.Sigmoid):
         super(QuanSigmoid, self).__init__()
         self.quan_input = quan_input
         self.mode = mode
+        # PWL sigmoid approximation (7 seg points -> 8 segments)
+        self.seg_point = torch.tensor([-4.375, -2.0, -1.0, 0.0, 1.0, 2.0, 4.375])
+        self.coeff = torch.tensor([0.0, 0.046875, 0.15625, 0.234375, 0.234375, 0.15625, 0.046875, 0.0])
+        self.intercept = torch.tensor([0.0, 0.203125, 0.421875, 0.5, 0.5, 0.578125, 0.796875, 1.0])
         if self.quan_input:
             self.nbit_a = nbit_a
             if self.mode == 'lsq':
@@ -61,11 +65,48 @@ class QuanSigmoid(nn.Sigmoid):
                 self.quan_a = lsq_a
             else:
                 raise NotImplementedError('Not implemented other quantization technique yet')
-            
+             
     def forward(self, input, scale_x=None):
-        if self.quan_input:
-            input, scale_x, _ = self.quan_a(input)
-        return torch.sigmoid(input)
+        if not self.quan_input:
+            return super().forward(input)
+
+        input, scale_x, if_init = self.quan_a(input)
+
+        if if_init:
+            return super().forward(input)
+
+        input = input / scale_x
+        device = input.device
+
+        scale = scale_x
+        decimal_bit = -torch.log2(scale).int().item()
+
+        seg_point_scale = self.seg_point.to(device)
+        self.coeff = self.coeff.to(device)
+        self.intercept = self.intercept.to(device)
+
+        intercept_scale = round_to_nearest_bits_torch(self.intercept, 6) / scale
+        coeff_scale = round_to_nearest_bits_torch(self.coeff, 6)
+
+        seg_point_scale = round_to_nearest_bits_torch(seg_point_scale, decimal_bit)
+        seg_point_scale = seg_point_scale / scale
+
+        pwl_func = torch.zeros_like(input, device=device)
+        mask = input.lt(seg_point_scale[0])
+        pwl_func = torch.where(mask, intercept_scale[0] + coeff_scale[0] * input, pwl_func)
+        for i in range(1, len(seg_point_scale)):
+            mask = input.ge(seg_point_scale[i - 1]) & input.lt(seg_point_scale[i])
+            pwl_func = torch.where(mask, intercept_scale[i] + coeff_scale[i] * input, pwl_func)
+        mask = input.ge(seg_point_scale[-1])
+        pwl_func = torch.where(mask, intercept_scale[-1] + coeff_scale[-1] * input, pwl_func)
+
+        pwl_out = torch.clamp(pwl_func * scale, 0.0, 1.0)
+
+        # Avoid emitting sigmoid during inference/export; keep STE behavior in training.
+        if self.training and torch.is_grad_enabled():
+            fp_out = super().forward(input * scale)
+            return (pwl_out - fp_out).detach() + fp_out
+        return pwl_out
     
 class QuanGELU(nn.GELU):
     """docstring for QuanConv"""

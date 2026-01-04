@@ -103,7 +103,7 @@ class ImagePadder(object):
         self.value = float(value)
         self._pad = None  # (left, right, top, bottom)
 
-    def pad(self, image):
+    def pad(self, image):   # 该函数对图像进行填充，使得图像的高和宽均为min_size的整数倍，填充的像素值为mode指定的方式，relicate表示复制边缘像素
         """Pad image to multiples of `min_size` (symmetric padding).
 
         RAFT-style padding is important for clean borders. Using `mode="replicate"`
